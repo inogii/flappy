@@ -1,2 +1,5 @@
 __pycache__
 .DS_Store
+state_batch*
+model.h5
+
