@@ -25,10 +25,12 @@ threshold_sky = 200  # Distance from sky to consider as 'close'
 input_shape = (new_height, new_width, 1)
 action_space = 2  
 num_episodes = 1000 
-batch_size = 512  
-randomize_threshold = 0.5
+batch_size = 128  
+randomize_threshold = 0.8
 
 large_positive_reward = 0.5
+safety_distance = 50
+new_safety_distance = int(safety_distance / downscale)
 learning_rate = 0.001
 
 
@@ -71,13 +73,11 @@ def save_processed_state_as_png(state, info, filename='processed_state.png'):
     pipe_bottom = pipe['bottom'] / downscale
     gap_center = (pipe_bottom + pipe_height) / 2
     
-    # Plot a vertical line at the x-coordinate of the bird
-    # from the y-coordinate of the bird to the center of the gap
-    ax.axhline(pipe_height, color='black', linewidth=4)
-    ax.axhline(pipe_bottom, color='black', linewidth=4)
+    ax.axhline(pipe_height-new_safety_distance, color='black', linewidth=4)
+    ax.axhline(pipe_bottom+new_safety_distance, color='black', linewidth=4)
     ax.axhline(gap_center, color='white', linewidth=2)
 
-    ax.plot([bird_x, bird_x], [bird_y, gap_center], color='blue', linestyle='-', linewidth=2)
+    ax.plot([bird_x, bird_x], [min(bird_y, gap_center), max(bird_y, gap_center)], color='blue', linestyle='-', linewidth=2)
 
     plt.axis('off')  # Turn off axis numbers and labels
     plt.savefig(filename, bbox_inches='tight', pad_inches=0)
@@ -102,26 +102,26 @@ def pipe_reward(info, action):
     bird_y = info['bird']['y']
     pipe_info = info['pipes'][0]  # Assuming the first pipe is the next obstacle
     pipe_x = pipe_info['x']
-    pipe_top = pipe_info['top']
+    pipe_height = pipe_info['height']
     pipe_bottom = pipe_info['bottom']
-    gap_center = (pipe_bottom + pipe_top) / 2
+    gap_center = (pipe_bottom + pipe_height) / 2
 
     reward = 0
 
     # Check if the pipe is visible on the screen
     if 0 < pipe_x <= width:
         # The bird is within the vertical range of the pipe
-        if bird_y > pipe_top and bird_y < pipe_bottom:
+        if bird_y > pipe_height-safety_distance and bird_y < pipe_bottom+safety_distance:
             # Calculate the distance from the bird to the center of the gap
             distance_center_bird = bird_y - gap_center
             # Define the maximum possible distance (half the gap height)
-            max_distance = (pipe_bottom - pipe_top) / 2
-            if distance_center_bird < 0 & action == 1:
+            max_distance = (pipe_bottom - pipe_height) / 2
+            if distance_center_bird > 0 and action == 1:
                 # Bird is below the center of the gap
-                reward = large_positive_reward * (1 - distance_center_bird / max_distance)
-            elif distance_center_bird > 0 & action == 0:
+                reward = large_positive_reward * abs(distance_center_bird) / max_distance
+            elif distance_center_bird < 0 and action == 0:
                 # Bird is above the center of the gap
-                reward = large_positive_reward * (1 + distance_center_bird / max_distance)
+                reward = large_positive_reward * abs(distance_center_bird) / max_distance
 
     return reward
 
@@ -180,7 +180,7 @@ def train_dqn(env):
 
             print(f'Action: {action}, Reward: {reward}, Randomize: {randomized}')
 
-            replay_memory.append((state, action, reward, next_state, done))
+            replay_memory.append((state, action, reward, next_state, done, info))
     
             state = next_state
             total_reward += reward
@@ -189,9 +189,9 @@ def train_dqn(env):
                 break
         count = 0
         if total_reward > 0.1:
-            for state_batch, action, reward, next_state_batch, done in replay_memory:
+            for state_batch, action, reward, next_state_batch, done, info in replay_memory:
                 target = reward
-                save_processed_state_as_png(state_batch[0], info, f'my_processed_frame_{count}.png')
+                #save_processed_state_as_png(state_batch[0], info, f'my_processed_frame_{count}.png')
                 count += 1
                 target_f = model.predict(state_batch, verbose=0)
                 target_f[0][action] = target
