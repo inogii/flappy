@@ -17,21 +17,25 @@ height = 800
 downscale = 8
 new_width = int(width/downscale)
 new_height = int(height/downscale)
+channels = 1
+stack_size = 4
 
 sky_y = 0  # Assuming the top of the frame is at y = 0
 threshold_ground = 200  # Distance from ground to consider as 'close'
 threshold_sky = 200  # Distance from sky to consider as 'close'
 
-input_shape = (new_height, new_width, 1)
+batch_size = 16
+input_shape = (new_height, new_width, stack_size)
 action_space = 2  
 num_episodes = 1000 
-batch_size = 128  
-randomize_threshold = 0.8
 
-large_positive_reward = 0.5
+randomize_threshold = 0.7
+
+large_positive_reward = 0.001
 safety_distance = 50
 new_safety_distance = int(safety_distance / downscale)
 learning_rate = 0.001
+
 
 
 def preprocess_frame(frame, new_width=new_width, new_height=new_height):
@@ -53,7 +57,7 @@ def preprocess_frame(frame, new_width=new_width, new_height=new_height):
 
     return normalized_frame
 
-def save_processed_state_as_png(state, info, filename='processed_state.png'):
+def save_processed_state_as_png(state, info=None, filename='processed_state.png'):
     """
     Save the processed state (image frame) as a PNG file.
     
@@ -64,20 +68,21 @@ def save_processed_state_as_png(state, info, filename='processed_state.png'):
     fig, ax = plt.subplots()
     ax.imshow(state, cmap='gray')  # Assuming state is a grayscale image
 
-    bird_x = info['bird']['x'] / downscale
-    bird_y = info['bird']['y'] / downscale
-    pipe = info['pipes'][0]  # Assuming the first pipe in the list is the next obstacle
+    if info != None:
+        bird_x = info['bird']['x'] / downscale
+        bird_y = max(0, info['bird']['y'] / downscale)
+        pipe = info['pipes'][0]  # Assuming the first pipe in the list is the next obstacle
 
-    # Calculate the center of the gap
-    pipe_height = pipe['height'] / downscale
-    pipe_bottom = pipe['bottom'] / downscale
-    gap_center = (pipe_bottom + pipe_height) / 2
-    
-    ax.axhline(pipe_height-new_safety_distance, color='black', linewidth=4)
-    ax.axhline(pipe_bottom+new_safety_distance, color='black', linewidth=4)
-    ax.axhline(gap_center, color='white', linewidth=2)
+        # Calculate the center of the gap
+        pipe_height = pipe['height'] / downscale
+        pipe_bottom = pipe['bottom'] / downscale
+        gap_center = (pipe_bottom + pipe_height) / 2
+        
+        ax.axhline(pipe_height-new_safety_distance, color='black', linewidth=4)
+        ax.axhline(pipe_bottom+new_safety_distance, color='black', linewidth=4)
+        ax.axhline(gap_center, color='white', linewidth=2)
 
-    ax.plot([bird_x, bird_x], [min(bird_y, gap_center), max(bird_y, gap_center)], color='blue', linestyle='-', linewidth=2)
+        ax.plot([bird_x, bird_x], [min(bird_y, gap_center), max(bird_y, gap_center)], color='blue', linestyle='-', linewidth=2)
 
     plt.axis('off')  # Turn off axis numbers and labels
     plt.savefig(filename, bbox_inches='tight', pad_inches=0)
@@ -130,14 +135,14 @@ def instantiate_model(input_shape, action_space):
     model.compile(loss='mse', optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=0.001))
     return model
 
-def process_state (state, info=None):
-       
+def process_state(state, info=None):
         if info is not None:
             state = preprocess_frame(state)  # Assuming the first element is the image
-            #save_processed_state_as_png(state, info, 'my_processed_frame.png')
+            save_processed_state_as_png(state, info, 'my_processed_frame.png')
         else:
             state = preprocess_frame(state[0])
-        state = state.reshape(1, new_height, new_width, 1)  # Add batch and channel dimensions
+            save_processed_state_as_png(state, info, 'my_processed_frame.png')
+        state = np.reshape(state, (new_height, new_width, channels))
         return state
 
 def randomize_action(action):
@@ -155,47 +160,94 @@ def get_reward(info, action):
     return reward
 
 def train_dqn(env):
-
     model = instantiate_model(input_shape, action_space)
     replay_memory = []
+    large_reward_memory = []
 
     for episode in range(num_episodes):
-
         state_raw = env.reset()
+        
         state = process_state(state_raw)
         
+        # Assuming state is the initial frame with shape [100, 72, 1]
+        frame_stack = np.repeat(state, stack_size, axis=-1)
+        print(frame_stack.shape)
+        state_batch = np.expand_dims(frame_stack, axis=0)
+        print(state_batch.shape)
+
         total_reward = 0
-        count = 0
 
         while True:
-
-            action = np.argmax(model.predict(state, verbose=0))  # Predict the action
-            
+            # Prepare stacked_state for prediction
+            action = np.argmax(model.predict(state_batch, verbose=0)[0])  # Predict the action
             action, randomized = randomize_action(action)
-            
+
             next_state_raw, reward, done, _, info = env.step(action)
             next_state = process_state(next_state_raw, info)
 
+            # Remove the oldest frame and add the new frame
+            frame_stack = np.append(frame_stack[:, :, 1:], next_state, axis=-1)          
             reward = get_reward(info, action)
-
             print(f'Action: {action}, Reward: {reward}, Randomize: {randomized}')
 
-            replay_memory.append((state, action, reward, next_state, done, info))
-    
-            state = next_state
+            replay_memory.append((frame_stack, action, reward, next_state, done, info))
+            if reward > 0:
+                large_reward_memory.append((state, action, reward, next_state, done, info))
+
+            state_batch = np.expand_dims(frame_stack, axis=0)
             total_reward += reward
 
             if done:
                 break
-        count = 0
-        if total_reward > 0.1:
-            for state_batch, action, reward, next_state_batch, done, info in replay_memory:
+
+
+        print('Training model...')
+        # if total_reward > 0:
+        #     for state_batch, action, reward, next_state_batch, done, info in replay_memory:
+        #         target = reward
+        #         if not done:
+        #             # Compute the target for non-terminal states
+        #             target += gamma * np.amax(model.predict(next_state_batch, verbose=0))
+
+        #         # Predict the target Q-values for the current state
+        #         target_f = model.predict(state_batch, verbose=0)
+
+        #         # Update the target for the action taken
+        #         target_f[0][action] = target
+
+        #         # Fit the model
+        #         model.fit(state_batch, target_f, epochs=1, verbose=0)
+        
+       # Ensure large_reward_memory has enough samples
+       # Ensure large_reward_memory has enough samples
+        # Assuming large_reward_memory is available
+        if len(large_reward_memory) >= 10*batch_size:
+            # Sample a batch from large_reward_memory
+            reward_sample = random.sample(large_reward_memory, batch_size)
+
+            # Initialize arrays for batch training
+            state_batch = np.array([sample[0] for sample in reward_sample])
+
+            # Compute targets for batch
+            target_batch = np.zeros((batch_size, action_space)) # Initialize target batch with the correct shape
+            for i, (state, action, reward, next_state, done, info) in enumerate(reward_sample):
                 target = reward
-                #save_processed_state_as_png(state_batch[0], info, f'my_processed_frame_{count}.png')
-                count += 1
-                target_f = model.predict(state_batch, verbose=0)
-                target_f[0][action] = target
-                model.fit(state_batch, target_f, epochs=5, verbose=0)
+                if not done:
+                    # Reshape next_state for single sample prediction
+                    next_state_reshaped = np.expand_dims(next_state, axis=0)
+                    target += gamma * np.amax(model.predict(next_state_reshaped, verbose=0))
+                # Update the target for the action taken
+                target_batch[i][action] = target
+
+            # Fit the model on the entire batch
+            model.fit(state_batch, target_batch, epochs=20, verbose=1)
+
+            # Prune large_reward_memory to keep the best 1000 rewards
+            large_reward_memory = sorted(large_reward_memory, key=lambda x: x[2], reverse=True)[:1000]
+
+
+
+
 
 def main():
     env = gym.make('FlappyBird-v0', render_mode='human')
