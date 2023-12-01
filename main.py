@@ -18,7 +18,7 @@ downscale = 8
 new_width = int(width/downscale)
 new_height = int(height/downscale)
 channels = 1
-stack_size = 32
+stack_size = 8
 
 sky_y = 0  # Assuming the top of the frame is at y = 0
 threshold_ground = 100  # Distance from ground to consider as 'close'
@@ -74,18 +74,17 @@ def save_processed_state_as_png(state, info=None, filename='processed_state.png'
         bird_x = info['bird']['x'] / downscale
         bird_y = max(0, info['bird']['y'] / downscale)
         pipe = info['pipes'][0]  # Assuming the first pipe in the list is the next obstacle
-
+        ground_y = info['base']['y'] / downscale
         # Calculate the center of the gap
         pipe_height = pipe['height'] / downscale
         pipe_bottom = pipe['bottom'] / downscale
         gap_center = (pipe_bottom + pipe_height) / 2
-        
-        ax.axhline(pipe_height+new_safety_distance, color='black', linewidth=4)
-        ax.axhline(pipe_bottom-new_safety_distance, color='black', linewidth=4)
-        ax.axhline(gap_center, color='white', linewidth=2)
+        pipe_x = pipe['x'] / downscale
 
-        ax.plot([bird_x, bird_x], [min(bird_y, gap_center), max(bird_y, gap_center)], color='blue', linestyle='-', linewidth=2)
-
+        ax.plot([bird_x, pipe_x], [min(bird_y, gap_center), max(bird_y, gap_center)], color='blue', linestyle='-', linewidth=2)
+        ax.plot([bird_x, pipe_x], [ground_y, pipe_bottom], color='red', linestyle='-', linewidth=2)
+        ax.plot([bird_x, pipe_x], [sky_y, pipe_height], color='red', linestyle='-', linewidth=2)
+    
     plt.axis('off')  # Turn off axis numbers and labels
     plt.savefig(filename, bbox_inches='tight', pad_inches=0)
     plt.close()
@@ -109,8 +108,30 @@ def avoid_ground_sky_reward(state, action):
 
     return reward
 
+def is_point_above_line(point, line_point1, line_point2):
+    """
+    Check if a point is above or below the line defined by two points.
+    
+    :param point: Tuple (x, y) for the point to check.
+    :param line_point1: Tuple (x, y) for the first point on the line.
+    :param line_point2: Tuple (x, y) for the second point on the line.
+    :return: True if the point is above the line, False if below.
+    """
+    # Calculate the slope (m)
+    m = (line_point2[1] - line_point1[1]) / (line_point2[0] - line_point1[0])
+    # Calculate the y-intercept (b)
+    b = line_point1[1] - m * line_point1[0]
+    
+    # Calculate the y value of the line at the x position of the point
+    y_line_at_point_x = m * point[0] + b
+    
+    # If the y value of the point is greater than the line's y value, it's above the line
+    return point[1] > y_line_at_point_x
+
 def pipe_reward(info, action):
     bird_y = info['bird']['y']
+    bird_x = info['bird']['x']
+    ground_y = info['base']['y']
     pipe_info = info['pipes'][0]  # Assuming the first pipe is the next obstacle
     pipe_x = pipe_info['x']
     pipe_height = pipe_info['height']
@@ -119,7 +140,18 @@ def pipe_reward(info, action):
     gap_center_x = pipe_x
     # calculate euclidean distance between bird and gap center
     euclidean_distance = np.sqrt((bird_y - gap_center_y)**2 + (0 - gap_center_x)**2)
-    reward = (1000 - euclidean_distance) / 1000
+    top_line_point1 = (pipe_x - 500, sky_y)
+    top_line_point2 = (pipe_x, pipe_height)
+    bottom_line_point1 = (pipe_x - 500, ground_y)
+    bottom_line_point2 = (pipe_x, pipe_bottom)
+    # check if bird is above or below the top line
+    above_top_line = is_point_above_line((bird_x, bird_y), top_line_point1, top_line_point2)
+    # check if bird is above or below the bottom line
+    above_bottom_line = is_point_above_line((bird_x, bird_y), bottom_line_point1, bottom_line_point2)
+    if not above_top_line or above_bottom_line:
+        reward = -0.001
+    else:
+        reward = (1000 - euclidean_distance) / 1000
     return reward
 
 def instantiate_model(input_shape, action_space):
@@ -186,9 +218,9 @@ def train_dqn(env):
             print(f'Action: {action}, Reward: {reward}, Randomize: {randomized}')
 
             replay_memory.append((frame_stack, action, reward, new_frame_stack, done, info))
-            if reward > 0.7 and action == 1:
+            if reward > 0.5 and action == 1:
                 large_reward_memory_1.append((frame_stack, action, reward, new_frame_stack, done, info))
-            if reward > 0.7 and action == 0:
+            if reward > 0.5 and action == 0:
                 large_reward_memory_0.append((frame_stack, action, reward, new_frame_stack, done, info))
 
             frame_stack = new_frame_stack
