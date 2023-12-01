@@ -1,5 +1,7 @@
 __pycache__
 .DS_Store
 state_batch*
-model.h5
+flappy_bird_dqn.keras
+flappy_bird_dqn.h5
+*.keras
 

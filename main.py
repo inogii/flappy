@@ -18,23 +18,25 @@ downscale = 8
 new_width = int(width/downscale)
 new_height = int(height/downscale)
 channels = 1
-stack_size = 4
+stack_size = 32
 
 sky_y = 0  # Assuming the top of the frame is at y = 0
-threshold_ground = 200  # Distance from ground to consider as 'close'
-threshold_sky = 200  # Distance from sky to consider as 'close'
+threshold_ground = 100  # Distance from ground to consider as 'close'
+threshold_sky = 100  # Distance from sky to consider as 'close'
 
 batch_size = 16
 input_shape = (new_height, new_width, stack_size)
 action_space = 2  
 num_episodes = 1000 
 
-randomize_threshold = 0.7
+randomize_threshold = 0.8
 
-large_positive_reward = 0.001
+large_positive_reward = 0.005
 safety_distance = 50
 new_safety_distance = int(safety_distance / downscale)
-learning_rate = 0.001
+learning_rate = 0.00025
+min_replay_memory_size = 16
+training_batch_size = 16
 
 
 
@@ -78,8 +80,8 @@ def save_processed_state_as_png(state, info=None, filename='processed_state.png'
         pipe_bottom = pipe['bottom'] / downscale
         gap_center = (pipe_bottom + pipe_height) / 2
         
-        ax.axhline(pipe_height-new_safety_distance, color='black', linewidth=4)
-        ax.axhline(pipe_bottom+new_safety_distance, color='black', linewidth=4)
+        ax.axhline(pipe_height+new_safety_distance, color='black', linewidth=4)
+        ax.axhline(pipe_bottom-new_safety_distance, color='black', linewidth=4)
         ax.axhline(gap_center, color='white', linewidth=2)
 
         ax.plot([bird_x, bird_x], [min(bird_y, gap_center), max(bird_y, gap_center)], color='blue', linestyle='-', linewidth=2)
@@ -98,6 +100,10 @@ def avoid_ground_sky_reward(state, action):
     # Reward for avoiding the sky
     elif bird_y - sky_y < threshold_sky and action == 0:
         reward = large_positive_reward
+    # elif ground_y - bird_y < threshold_ground and action == 0:
+    #     reward = -large_positive_reward
+    # elif bird_y - sky_y < threshold_sky and action == 1:
+    #     reward = -large_positive_reward
     else:
         reward = 0  # Default reward
 
@@ -109,30 +115,16 @@ def pipe_reward(info, action):
     pipe_x = pipe_info['x']
     pipe_height = pipe_info['height']
     pipe_bottom = pipe_info['bottom']
-    gap_center = (pipe_bottom + pipe_height) / 2
-
-    reward = 0
-
-    # Check if the pipe is visible on the screen
-    if 0 < pipe_x <= width:
-        # The bird is within the vertical range of the pipe
-        if bird_y > pipe_height-safety_distance and bird_y < pipe_bottom+safety_distance:
-            # Calculate the distance from the bird to the center of the gap
-            distance_center_bird = bird_y - gap_center
-            # Define the maximum possible distance (half the gap height)
-            max_distance = (pipe_bottom - pipe_height) / 2
-            if distance_center_bird > 0 and action == 1:
-                # Bird is below the center of the gap
-                reward = large_positive_reward * abs(distance_center_bird) / max_distance
-            elif distance_center_bird < 0 and action == 0:
-                # Bird is above the center of the gap
-                reward = large_positive_reward * abs(distance_center_bird) / max_distance
-
+    gap_center_y = (pipe_bottom + pipe_height) / 2
+    gap_center_x = pipe_x
+    # calculate euclidean distance between bird and gap center
+    euclidean_distance = np.sqrt((bird_y - gap_center_y)**2 + (0 - gap_center_x)**2)
+    reward = (1000 - euclidean_distance) / 1000
     return reward
 
 def instantiate_model(input_shape, action_space):
     model = create_model(input_shape, action_space)
-    model.compile(loss='mse', optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=0.001))
+    model.compile(loss='mse', optimizer=tf.keras.optimizers.legacy.RMSprop(learning_rate=learning_rate, rho=0.95, epsilon=0.01), metrics=['accuracy'])
     return model
 
 def process_state(state, info=None):
@@ -145,7 +137,7 @@ def process_state(state, info=None):
         state = np.reshape(state, (new_height, new_width, channels))
         return state
 
-def randomize_action(action):
+def randomize_action(action, randomize_threshold=randomize_threshold):
     randomize = random.random()
     randomized = False
     if randomize > randomize_threshold:
@@ -153,16 +145,17 @@ def randomize_action(action):
         randomized = True
     return action, randomized
 
-def get_reward(info, action):
-    reward = 0
-    reward += avoid_ground_sky_reward(info, action)
+def get_reward(info, action, reward=0):
+    #reward += avoid_ground_sky_reward(info, action)
     reward += pipe_reward(info, action) 
     return reward
 
 def train_dqn(env):
     model = instantiate_model(input_shape, action_space)
     replay_memory = []
-    large_reward_memory = []
+    large_reward_memory_1 = []
+    large_reward_memory_0 = []
+    randomize_threshold = 0.7
 
     for episode in range(num_episodes):
         state_raw = env.reset()
@@ -171,83 +164,105 @@ def train_dqn(env):
         
         # Assuming state is the initial frame with shape [100, 72, 1]
         frame_stack = np.repeat(state, stack_size, axis=-1)
-        print(frame_stack.shape)
+        #print(frame_stack.shape)
         state_batch = np.expand_dims(frame_stack, axis=0)
-        print(state_batch.shape)
+        #print(state_batch.shape)
 
         total_reward = 0
-
+        count = 0
         while True:
+            count += 1
             # Prepare stacked_state for prediction
             action = np.argmax(model.predict(state_batch, verbose=0)[0])  # Predict the action
-            action, randomized = randomize_action(action)
+            action, randomized = randomize_action(action, randomize_threshold=randomize_threshold)
 
             next_state_raw, reward, done, _, info = env.step(action)
             next_state = process_state(next_state_raw, info)
 
             # Remove the oldest frame and add the new frame
-            frame_stack = np.append(frame_stack[:, :, 1:], next_state, axis=-1)          
-            reward = get_reward(info, action)
+            new_frame_stack = np.append(frame_stack[:, :, 1:], next_state, axis=-1)          
+            reward = get_reward(info, action, reward)
+            total_reward += reward
             print(f'Action: {action}, Reward: {reward}, Randomize: {randomized}')
 
-            replay_memory.append((frame_stack, action, reward, next_state, done, info))
-            if reward > 0:
-                large_reward_memory.append((state, action, reward, next_state, done, info))
+            replay_memory.append((frame_stack, action, reward, new_frame_stack, done, info))
+            if reward > 0.7 and action == 1:
+                large_reward_memory_1.append((frame_stack, action, reward, new_frame_stack, done, info))
+            if reward > 0.7 and action == 0:
+                large_reward_memory_0.append((frame_stack, action, reward, new_frame_stack, done, info))
 
+            frame_stack = new_frame_stack
             state_batch = np.expand_dims(frame_stack, axis=0)
-            total_reward += reward
 
             if done:
                 break
-
-
-        print('Training model...')
-        # if total_reward > 0:
-        #     for state_batch, action, reward, next_state_batch, done, info in replay_memory:
-        #         target = reward
-        #         if not done:
-        #             # Compute the target for non-terminal states
-        #             target += gamma * np.amax(model.predict(next_state_batch, verbose=0))
-
-        #         # Predict the target Q-values for the current state
-        #         target_f = model.predict(state_batch, verbose=0)
-
-        #         # Update the target for the action taken
-        #         target_f[0][action] = target
-
-        #         # Fit the model
-        #         model.fit(state_batch, target_f, epochs=1, verbose=0)
         
-       # Ensure large_reward_memory has enough samples
-       # Ensure large_reward_memory has enough samples
-        # Assuming large_reward_memory is available
-        if len(large_reward_memory) >= 10*batch_size:
-            # Sample a batch from large_reward_memory
-            reward_sample = random.sample(large_reward_memory, batch_size)
+        print('Training Replay...')
+        current_states = np.array([experience[0] for experience in replay_memory])
+        actions = np.array([experience[1] for experience in replay_memory])
+        rewards = np.array([experience[2] for experience in replay_memory])
+        next_states = np.array([experience[3] for experience in replay_memory])
+        dones = np.array([experience[4] for experience in replay_memory])
 
-            # Initialize arrays for batch training
-            state_batch = np.array([sample[0] for sample in reward_sample])
+        # Predict Q-values for current and next states
+        current_q_values = model.predict(current_states, verbose=0)
+        next_q_values = model.predict(next_states, verbose=0)
 
-            # Compute targets for batch
-            target_batch = np.zeros((batch_size, action_space)) # Initialize target batch with the correct shape
-            for i, (state, action, reward, next_state, done, info) in enumerate(reward_sample):
-                target = reward
-                if not done:
-                    # Reshape next_state for single sample prediction
-                    next_state_reshaped = np.expand_dims(next_state, axis=0)
-                    target += gamma * np.amax(model.predict(next_state_reshaped, verbose=0))
-                # Update the target for the action taken
-                target_batch[i][action] = target
+        # Compute target Q-values
+        target_q_values = rewards + gamma * np.amax(next_q_values, axis=1) * (~dones)
 
-            # Fit the model on the entire batch
-            model.fit(state_batch, target_batch, epochs=20, verbose=1)
+        # Update the Q-values for the actions taken
+        target_q_values_full = current_q_values
+        for i, action in enumerate(actions):
+            target_q_values_full[i][action] = target_q_values[i]
 
-            # Prune large_reward_memory to keep the best 1000 rewards
-            large_reward_memory = sorted(large_reward_memory, key=lambda x: x[2], reverse=True)[:1000]
+        # Train the model
+        model.fit(current_states, target_q_values_full, batch_size=training_batch_size, epochs=1, verbose=0)
+        replay_memory = []
 
+        # Training loop
+        if len(large_reward_memory_1) > min_replay_memory_size and len(large_reward_memory_0) > min_replay_memory_size:
+            print('Fine tuning...')
+            minibatch_1 = random.sample(large_reward_memory_1, training_batch_size)
+            minibatch_0 = random.sample(large_reward_memory_0, training_batch_size)
+            minibatch = minibatch_1 + minibatch_0
 
+            # Extracting components of the experiences
+            current_states = np.array([experience[0] for experience in minibatch])
+            actions = np.array([experience[1] for experience in minibatch])
+            rewards = np.array([experience[2] for experience in minibatch])
+            next_states = np.array([experience[3] for experience in minibatch])
+            dones = np.array([experience[4] for experience in minibatch])
 
+            # Predict Q-values for current and next states
+            current_q_values = model.predict(current_states, verbose=0)
+            next_q_values = model.predict(next_states, verbose=0)
 
+            # Compute target Q-values
+            target_q_values = rewards + gamma * np.amax(next_q_values, axis=1) * (~dones)
+
+            # Update the Q-values for the actions taken
+            target_q_values_full = current_q_values
+            for i, action in enumerate(actions):
+                target_q_values_full[i][action] = target_q_values[i]
+
+            # Train the model
+            model.fit(current_states, target_q_values_full, batch_size=training_batch_size, epochs=3, verbose=0)
+
+        # Optionally, prune the replay memory if it gets too large
+        if len(large_reward_memory_1) > 20000:
+            large_reward_memory_1 = replay_memory[-20000:]
+        
+        if len(large_reward_memory_0) > 20000:
+            large_reward_memory_0 = replay_memory[-20000:]
+        
+        # implement randomize threshold decay with episode
+        if randomize_threshold < 1:
+            randomize_threshold += 0.001
+        
+        if episode % 10 == 0:
+            model.save('flappy_bird_dqn.keras')
+            print(f'Episode: {episode}, Total Reward: {total_reward}, Randomize Threshold: {randomize_threshold}')
 
 def main():
     env = gym.make('FlappyBird-v0', render_mode='human')
