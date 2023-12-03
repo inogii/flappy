@@ -81,9 +81,12 @@ def save_processed_state_as_png(state, info=None, filename='processed_state.png'
         gap_center = (pipe_bottom + pipe_height) / 2
         pipe_x = pipe['x'] / downscale
 
-        ax.plot([bird_x, pipe_x], [min(bird_y, gap_center), max(bird_y, gap_center)], color='blue', linestyle='-', linewidth=2)
-        ax.plot([bird_x, pipe_x], [ground_y, pipe_bottom], color='red', linestyle='-', linewidth=2)
-        ax.plot([bird_x, pipe_x], [sky_y, pipe_height], color='red', linestyle='-', linewidth=2)
+        ax.plot([bird_x+64/8, pipe_x], [bird_y, gap_center], color='blue', linestyle='-', linewidth=2)
+        ax.plot([pipe_x-500/8, pipe_x+50/8], [ground_y, gap_center+20/8], color='red', linestyle='-', linewidth=2)
+        ax.plot([pipe_x-500/8, pipe_x+50/8], [sky_y, gap_center-20/8], color='red', linestyle='-', linewidth=2)
+
+        ax.plot([pipe_x-64/8, pipe_x+100/8], [gap_center-40/8, gap_center-40/8], color='green', linestyle='-', linewidth=2)
+        ax.plot([pipe_x-64/8, pipe_x+100/8], [gap_center+40/8, gap_center+40/8], color='green', linestyle='-', linewidth=2)
     
     plt.axis('off')  # Turn off axis numbers and labels
     plt.savefig(filename, bbox_inches='tight', pad_inches=0)
@@ -139,16 +142,21 @@ def pipe_reward(info, action):
     gap_center_y = (pipe_bottom + pipe_height) / 2
     gap_center_x = pipe_x
     # calculate euclidean distance between bird and gap center
-    euclidean_distance = np.sqrt((bird_y - gap_center_y)**2 + (0 - gap_center_x)**2)
+    euclidean_distance = np.sqrt((bird_y - gap_center_y)**2 + (0 - gap_center_x+100)**2)
     top_line_point1 = (pipe_x - 500, sky_y)
-    top_line_point2 = (pipe_x, pipe_height)
+    top_line_point2 = (pipe_x-50, gap_center_y-20)
     bottom_line_point1 = (pipe_x - 500, ground_y)
-    bottom_line_point2 = (pipe_x, pipe_bottom)
+    bottom_line_point2 = (pipe_x-50, gap_center_y+20)
     # check if bird is above or below the top line
     above_top_line = is_point_above_line((bird_x, bird_y), top_line_point1, top_line_point2)
     # check if bird is above or below the bottom line
     above_bottom_line = is_point_above_line((bird_x, bird_y), bottom_line_point1, bottom_line_point2)
+    # check if bird is over the center gap
+    in_pipe = bird_x > pipe_x - 64 and bird_x < pipe_x + 100
+    pipe_center_threshold = bird_y > gap_center_y - 40 and bird_y < gap_center_y + 40
     if not above_top_line or above_bottom_line:
+        reward = -0.001
+    elif in_pipe and not pipe_center_threshold:
         reward = -0.001
     else:
         reward = (1000 - euclidean_distance) / 1000
