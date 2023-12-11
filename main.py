@@ -88,7 +88,7 @@ def save_processed_state_as_png(state, info=None, filename='processed_state.png'
         gap_center_x = pipe['x'] / downscale
         pipe_x = pipe['x'] / downscale
 
-        ax.plot([bird_x+64/8, pipe_x], [bird_y, gap_center_x + 100/8], color='blue', linestyle='-', linewidth=2)
+        ax.plot([bird_x+64/8, pipe_x+100/8], [bird_y, gap_center], color='blue', linestyle='-', linewidth=2)
         ax.plot([pipe_x-500/8, pipe_x-64/8], [ground_y, gap_center+20/8], color='red', linestyle='-', linewidth=2)
         ax.plot([pipe_x-500/8, pipe_x-64/8], [sky_y, gap_center-20/8], color='red', linestyle='-', linewidth=2)
 
@@ -171,7 +171,8 @@ def pipe_reward(info):
     gap_center_x = pipe_x
 
     # calculate euclidean distance between bird and gap center
-    euclidean_distance = np.sqrt((bird_y - gap_center_y)**2 + (0 - gap_center_x+100)**2)
+    euclidean_distance = np.sqrt((bird_y - gap_center_y)**2 + (bird_x - gap_center_x+100)**2)
+    #print(f'Euclidean Distance: {euclidean_distance}')
 
     # calculate the top and bottom lines
     top_line_point1 = (pipe_x - 500, sky_y)
@@ -192,8 +193,8 @@ def pipe_reward(info):
     #     reward = -0.001
     else:
         # exponential reward function accentuates the difference between being close to the center and being far away
-        reward = math.exp((5*10**5 - euclidean_distance**2) / 10**6)-1
-    return reward
+        reward = math.exp((410 - euclidean_distance) / 410)-1
+    return max(-0.001, reward)
 
 def instantiate_model(input_shape, action_space):
     '''
