@@ -3,6 +3,7 @@ import random
 import cv2 
 import pprint
 import math
+import keras
 import flappy_bird_env  # noqa
 import numpy as np
 import gymnasium as gym
@@ -19,7 +20,7 @@ downscale = 8
 new_width = int(width/downscale)
 new_height = int(height/downscale)
 channels = 1
-stack_size = 16
+stack_size = 8
 
 sky_y = 0  # Assuming the top of the frame is at y = 0
 threshold_ground = 100  # Distance from ground to consider as 'close'
@@ -39,6 +40,7 @@ learning_rate = 0.00025
 min_replay_memory_size = 16
 training_batch_size = 16
 
+old_distance = np.inf
 
 def preprocess_frame(frame, new_width=new_width, new_height=new_height):
     """
@@ -74,7 +76,7 @@ def save_processed_state_as_png(state, info=None, filename='processed_state.png'
     """
     
     fig, ax = plt.subplots()
-    ax.imshow(state)  # Assuming state is a grayscale image
+    ax.imshow(state, cmap='gray')  # Assuming state is a grayscale image
 
     if info != None:
         bird_x = info['bird']['x'] / downscale
@@ -89,12 +91,25 @@ def save_processed_state_as_png(state, info=None, filename='processed_state.png'
         pipe_x = pipe['x'] / downscale
 
         ax.plot([bird_x+64/8, pipe_x+100/8], [bird_y, gap_center], color='blue', linestyle='-', linewidth=2)
-        ax.plot([pipe_x-500/8, pipe_x-64/8], [ground_y, gap_center+20/8], color='red', linestyle='-', linewidth=2)
-        ax.plot([pipe_x-500/8, pipe_x-64/8], [sky_y, gap_center-20/8], color='red', linestyle='-', linewidth=2)
+        ax.plot([pipe_x-500/8, pipe_x-32/8], [ground_y, gap_center+60/8], color='red', linestyle='-', linewidth=2)
+        ax.plot([pipe_x-500/8, pipe_x-32/8], [sky_y, gap_center-60/8], color='red', linestyle='-', linewidth=2)
 
-        ax.plot([pipe_x-64/8, pipe_x+100/8], [gap_center-60/8, gap_center-60/8], color='green', linestyle='-', linewidth=2)
-        ax.plot([pipe_x-64/8, pipe_x+100/8], [gap_center+60/8, gap_center+60/8], color='green', linestyle='-', linewidth=2)
-    
+        ax.plot([pipe_x-32/8, pipe_x+100/8], [gap_center-60/8, gap_center-60/8], color='green', linestyle='-', linewidth=2)
+        ax.plot([pipe_x-32/8, pipe_x+100/8], [gap_center+60/8, gap_center+60/8], color='green', linestyle='-', linewidth=2)
+        
+        euclidean_distance = np.sqrt(((bird_y - gap_center)**2) + ((bird_x - gap_center_x)**2))
+
+        # print distance with 2 decimal places
+        ax.title.set_text(f'Distance: {euclidean_distance:.2f}')
+        # above_bottom_line = is_point_above_line((bird_x+64/8, bird_y), (pipe_x-500/8, ground_y), (pipe_x-32/8, gap_center+60/8))
+        # below_top_line = not (is_point_above_line((bird_x+64/8, bird_y), (pipe_x-500/8, sky_y), (pipe_x-32/8, gap_center-60/8)))
+        in_pipe = ((bird_x + 64/8) > (pipe_x - 32/8)) and (bird_x < (pipe_x + 100/8))
+        above_gap_top_line = is_point_above_line((bird_x+64/8, bird_y), (pipe_x-32/8, gap_center-60/8), (pipe_x+100/8, gap_center-60/8))
+        below_gap_bottom_line = not (is_point_above_line((bird_x+64/8, bird_y), (pipe_x-32/8, gap_center+60/8), (pipe_x+100/8, gap_center+60/8)))
+        #ax.title.set_text(f'below pipe top: {in_pipe and (above_gap_top_line or below_gap_bottom_line)}')
+        #ax.title.set_text(f'in_pipe: {in_pipe}')
+        # ax.title.set_text(f'below top: {below_top_line}')
+
     plt.axis('off')  # Turn off axis numbers and labels
     plt.savefig(filename, bbox_inches='tight', pad_inches=0)
     plt.close()
@@ -146,7 +161,7 @@ def is_point_above_line(point, line_point1, line_point2):
     y_line_at_point_x = m * point[0] + b
     
     # If the y value of the point is greater than the line's y value, it's above the line
-    return point[1] > y_line_at_point_x
+    return point[1] < y_line_at_point_x
 
 def pipe_reward(info):
     '''
@@ -158,6 +173,8 @@ def pipe_reward(info):
     :param action: The action taken by the agent.
     :return: The reward for the action.
     '''
+
+    global old_distance
 
     # Get the relevant information from the state
     bird_y = info['bird']['y']
@@ -171,33 +188,52 @@ def pipe_reward(info):
     gap_center_x = pipe_x
 
     # calculate euclidean distance between bird and gap center
-    euclidean_distance = np.sqrt((bird_y - gap_center_y)**2 + (bird_x - gap_center_x+100)**2)
-    #print(f'Euclidean Distance: {euclidean_distance}')
+    euclidean_distance = np.sqrt(((bird_y - gap_center_y)**2) + ((bird_x - gap_center_x+100)**2))
 
     # calculate the top and bottom lines
     top_line_point1 = (pipe_x - 500, sky_y)
-    top_line_point2 = (pipe_x-64, gap_center_y-20)
+    top_line_point2 = (pipe_x - 32, gap_center_y-40)
     bottom_line_point1 = (pipe_x - 500, ground_y)
-    bottom_line_point2 = (pipe_x-64, gap_center_y+20)
+    bottom_line_point2 = (pipe_x - 32, gap_center_y+40)
 
     # check if bird is within the 'safe zone'
-    above_top_line = is_point_above_line((bird_x, bird_y), top_line_point1, top_line_point2)
-    above_bottom_line = is_point_above_line((bird_x, bird_y), bottom_line_point1, bottom_line_point2)
-    in_pipe = bird_x > pipe_x - 64 and bird_x < pipe_x + 100
-    pipe_center_threshold = bird_y > gap_center_y - 60 and bird_y < gap_center_y + 60
+    below_top_line = is_point_above_line((bird_x+64, bird_y), top_line_point1, top_line_point2)
+
+    above_bottom_line = is_point_above_line((bird_x+64, bird_y), bottom_line_point1, bottom_line_point2)
+    
+    in_pipe = ((bird_x + 44) > (pipe_x - 32)) and (bird_x < (pipe_x + 100))
+    above_gap_top_line = is_point_above_line((bird_x+64, bird_y), (pipe_x-32, gap_center_x-60), (pipe_x+100, gap_center_x-60))
+    below_gap_bottom_line = not (is_point_above_line((bird_x+64, bird_y), (pipe_x-32, gap_center_x+60), (pipe_x+100, gap_center_x+60)))
+
+    pipe_visible = (pipe_x < 520)
+    pipe_invisible = (pipe_x >= 520)
 
     # calculate reward based on bird's position
-    if not above_top_line or above_bottom_line:
+    if pipe_invisible and (bird_y > sky_y + 100) and (bird_y < ground_y - 100):
+        print('a')
+        reward = 0.009
+    elif pipe_invisible and (bird_y <= sky_y + 100) or (bird_y >= ground_y - 100):
+        print('b')
         reward = -0.001
-    # elif in_pipe and not pipe_center_threshold:
+    # elif pipe_visible and (not in_pipe) and ((below_top_line) or (not above_bottom_line)):
+    #     print('c')
     #     reward = -0.001
+    # elif in_pipe and (above_gap_top_line or not below_gap_bottom_line):
+    #     print('d')
+    #     reward = -0.001
+    elif old_distance < euclidean_distance:
+        print('c')
+        reward = -0.001
     else:
-        # exponential reward function accentuates the difference between being close to the center and being far away
-        reward = math.exp((410 - euclidean_distance) / 410)-1
+        print('e')
+        reward = (410 - euclidean_distance) / 410
+    
+    old_distance = euclidean_distance
+
     return max(-0.001, reward)
 
 def instantiate_model(input_shape, action_space):
-    '''
+    '''  
     Creates a new model with the specified input shape and action space.
     Compiles the model with the specified loss function and optimizer.
 
@@ -208,6 +244,10 @@ def instantiate_model(input_shape, action_space):
 
     model = create_model(input_shape, action_space)
     model.compile(loss='mse', optimizer=tf.keras.optimizers.legacy.RMSprop(learning_rate=learning_rate, rho=0.95, epsilon=0.01), metrics=['accuracy'])
+
+    dot_img_file = 'model_1_architecture.png'
+    keras.utils.plot_model(model, to_file=dot_img_file, show_shapes=True)
+
     return model
 
 def process_state(state, info=None):
@@ -311,9 +351,9 @@ def train_dqn(env, human_env=None):
 
             # Add the experience to the replay memory, and the large reward memory if applicable
             replay_memory.append((frame_stack, action, reward, new_frame_stack, done, info))
-            if reward > 0.85 and action == 1:
+            if reward > 0.65 and action == 1:
                 large_reward_memory_1.append((frame_stack, action, reward, new_frame_stack, done, info))
-            if reward > 0.85 and action == 0:
+            if reward > 0.65 and action == 0:
                 large_reward_memory_0.append((frame_stack, action, reward, new_frame_stack, done, info))
 
             # Update the frame stack
@@ -375,14 +415,14 @@ def train_dqn(env, human_env=None):
                 target_q_values_full[i][action] = target_q_values[i]
 
             # Train the model
-            model.fit(current_states, target_q_values_full, batch_size=training_batch_size, epochs=3, verbose=0)
+            model.fit(current_states, target_q_values_full, batch_size=training_batch_size, epochs=1, verbose=0)
 
         # Optionally, prune the replay memory if it gets too large
-        if len(large_reward_memory_1) > 100:
-            large_reward_memory_1 = replay_memory[-100:]
+        if len(large_reward_memory_1) > 1000:
+            large_reward_memory_1 = replay_memory[-1000:]
         
-        if len(large_reward_memory_0) > 100:
-            large_reward_memory_0 = replay_memory[-100:]
+        if len(large_reward_memory_0) > 1000:
+            large_reward_memory_0 = replay_memory[-1000:]
         
         # Implement randomize threshold decay with episode
         if epsilon < 1:
@@ -390,7 +430,7 @@ def train_dqn(env, human_env=None):
         
         if episode % 10 == 0:
             # Save the model every 10 episodes
-            model.save('flappy_bird_dqn.keras')
+            model.save('flappy_bird_dqn_2.keras')
 
             # Optionally, render the model, check how it performs
             # This is useful when the training is done with render_mode='rgb_array'
