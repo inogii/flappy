@@ -1,5 +1,7 @@
 # Reinforcement Learning for Flappy Bird
 
+https://github.com/inogii/flappy_rl/assets/94673757/3fd7b622-3f74-4fdf-a934-c8fef170bbf1
+
 ## Introduction
 This project is an exploration of applying reinforcement learning (RL) techniques to the popular game Flappy Bird. By leveraging the capabilities of modern machine learning libraries and game development tools, we aim to train an intelligent agent capable of mastering Flappy Bird.
 
